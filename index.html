@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>早押しクイズ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="join" class="card">
+    <h1>参加者登録</h1>
+    <input type="text" id="nameInput" placeholder="名前を入力" maxlength="20">
+    <br><br>
+    <button class="btn-primary" id="joinBtn">参加する</button>
+  </div>
+
+  <div id="play" class="card" style="display:none;text-align:center">
+    <h1 id="welcome"></h1>
+    <button class="buzzer" id="buzzBtn" disabled>待機中</button>
+    <div class="status" id="statusText">ボタンが有効になるまでお待ちください</div>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="supabase-config.js"></script>
+<script>
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+let pid = localStorage.getItem('quiz_pid');
+let name = localStorage.getItem('quiz_name');
+let currentRound = null;
+let buttonOn = false;
+let hasPressedThisRound = false;
+let roundChannel = null;
+let pressChannel = null;
+
+const joinEl = document.getElementById('join');
+const playEl = document.getElementById('play');
+const buzzBtn = document.getElementById('buzzBtn');
+const statusText = document.getElementById('statusText');
+
+function genId(){
+  return crypto.randomUUID();
+}
+
+async function showPlay(){
+  joinEl.style.display = 'none';
+  playEl.style.display = 'block';
+  document.getElementById('welcome').textContent = name + ' さん';
+  await initState();
+}
+
+document.getElementById('joinBtn').onclick = async () => {
+  const v = document.getElementById('nameInput').value.trim();
+  if(!v){ alert('名前を入力してください'); return; }
+  name = v;
+  pid = pid || genId();
+  localStorage.setItem('quiz_pid', pid);
+  localStorage.setItem('quiz_name', name);
+  await sb.from('participants').upsert({ id: pid, name });
+  showPlay();
+};
+
+if(pid && name){
+  sb.from('participants').upsert({ id: pid, name }).then(showPlay);
+}
+
+async function initState(){
+  const { data: qs } = await sb.from('quiz_state').select('current_round').eq('id', 1).single();
+  currentRound = qs.current_round;
+  const { data: rd } = await sb.from('rounds').select('button_on').eq('round', currentRound).single();
+  buttonOn = rd.button_on;
+  await checkOwnPress();
+  updateButtonUI();
+  subscribe();
+}
+
+async function checkOwnPress(){
+  const { data } = await sb.from('presses').select('order_num, elapsed_ms')
+    .eq('round', currentRound).eq('participant_id', pid).maybeSingle();
+  if(data){
+    hasPressedThisRound = true;
+    statusText.textContent = data.order_num + '番目に押しました（' + (data.elapsed_ms/1000).toFixed(2) + '秒）';
+  } else {
+    hasPressedThisRound = false;
+  }
+}
+
+function subscribe(){
+  if(roundChannel) sb.removeChannel(roundChannel);
+  roundChannel = sb.channel('rounds-' + pid)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'quiz_state' }, async payload => {
+      const newRound = payload.new.current_round;
+      if(newRound !== currentRound){
+        currentRound = newRound;
+        hasPressedThisRound = false;
+        statusText.textContent = 'ボタンが有効になるまでお待ちください';
+        const { data: rd } = await sb.from('rounds').select('button_on').eq('round', currentRound).single();
+        buttonOn = rd.button_on;
+        updateButtonUI();
+      }
+    })
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rounds' }, payload => {
+      if(payload.new.round === currentRound){
+        buttonOn = payload.new.button_on;
+        updateButtonUI();
+      }
+    })
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'presses',
+        filter: 'participant_id=eq.' + pid }, payload => {
+      if(payload.new.round === currentRound){
+        hasPressedThisRound = true;
+        statusText.textContent = payload.new.order_num + '番目に押しました（' + (payload.new.elapsed_ms/1000).toFixed(2) + '秒）';
+        updateButtonUI();
+      }
+    })
+    .subscribe();
+}
+
+function updateButtonUI(){
+  if(hasPressedThisRound){
+    buzzBtn.disabled = true;
+    buzzBtn.textContent = '押しました';
+  } else if(buttonOn){
+    buzzBtn.disabled = false;
+    buzzBtn.textContent = '押す！';
+    statusText.textContent = '今です！ボタンを押してください';
+  } else {
+    buzzBtn.disabled = true;
+    buzzBtn.textContent = '待機中';
+    statusText.textContent = 'ボタンが有効になるまでお待ちください';
+  }
+}
+
+buzzBtn.onclick = async () => {
+  if(!buttonOn || hasPressedThisRound) return;
+  hasPressedThisRound = true;
+  buzzBtn.disabled = true;
+  buzzBtn.textContent = '送信中…';
+
+  const { data, error } = await sb.rpc('press_buzzer', {
+    p_round: currentRound, p_participant_id: pid, p_name: name
+  });
+
+  if(error){
+    if(error.message.includes('already_pressed')){
+      // 既に処理済み。他経路（Realtime）で表示が更新されるので何もしない
+    } else if(error.message.includes('button_not_active')){
+      hasPressedThisRound = false;
+      updateButtonUI();
+    } else {
+      console.error(error);
+      hasPressedThisRound = false;
+      updateButtonUI();
+    }
+    return;
+  }
+  const row = data[0];
+  statusText.textContent = row.out_order + '番目に押しました（' + (row.out_elapsed_ms/1000).toFixed(2) + '秒）';
+};
+</script>
+</body>
+</html>

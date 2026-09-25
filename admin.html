@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>早押しクイズ 管理画面</title>
+<link rel="stylesheet" href="style.css">
+<style>.wrap{max-width:680px;width:100%}</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>管理画面</h1>
+
+  <div class="card" style="text-align:center">
+    <p class="muted">参加者はこのQRを読み取って参加</p>
+    <div id="qr"></div>
+    <p class="muted" id="joinUrl"></p>
+  </div>
+
+  <div class="card">
+    <div class="row-controls">
+      <button id="toggleBtn" class="btn-toggle-off">ボタン: OFF</button>
+      <button id="resetPressBtn" class="btn-warn">押下リセット（次の問題へ）</button>
+      <button id="resetAllBtn" class="btn-danger">参加者を全リセット</button>
+    </div>
+    <p class="muted">現在ラウンド: <span id="roundNum">-</span> / 参加者数: <span id="pCount">0</span></p>
+  </div>
+
+  <div class="card">
+    <h1 style="font-size:1.1rem">解答結果（この問題）</h1>
+    <table>
+      <thead><tr><th>順位</th><th>名前</th><th>タイム</th></tr></thead>
+      <tbody id="resultsBody"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h1 style="font-size:1.1rem">参加者一覧</h1>
+    <table>
+      <thead><tr><th>名前</th><th>参加時刻</th></tr></thead>
+      <tbody id="participantsBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<script src="supabase-config.js"></script>
+<script>
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const joinUrl = location.origin + location.pathname.replace(/admin\.html$/, 'index.html');
+document.getElementById('joinUrl').textContent = joinUrl;
+QRCode.toCanvas(joinUrl, { width: 200 }, (err, canvas) => {
+  if(!err) document.getElementById('qr').appendChild(canvas);
+});
+
+let buttonOn = false;
+let currentRound = 1;
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadParticipants(){
+  const { data } = await sb.from('participants').select('name, joined_at').order('joined_at');
+  document.getElementById('pCount').textContent = (data || []).length;
+  document.getElementById('participantsBody').innerHTML = (data || []).map(p =>
+    `<tr><td>${escapeHtml(p.name)}</td><td>${new Date(p.joined_at).toLocaleTimeString('ja-JP')}</td></tr>`
+  ).join('');
+}
+
+async function loadResults(){
+  const { data } = await sb.from('presses').select('name, order_num, elapsed_ms')
+    .eq('round', currentRound).order('order_num');
+  document.getElementById('resultsBody').innerHTML = (data || []).map(p =>
+    `<tr><td>${p.order_num}</td><td>${escapeHtml(p.name)}</td><td>${(p.elapsed_ms/1000).toFixed(2)}秒</td></tr>`
+  ).join('');
+}
+
+async function loadButtonState(){
+  const { data } = await sb.from('rounds').select('button_on').eq('round', currentRound).single();
+  buttonOn = data.button_on;
+  const btn = document.getElementById('toggleBtn');
+  btn.textContent = 'ボタン: ' + (buttonOn ? 'ON' : 'OFF');
+  btn.className = buttonOn ? 'btn-toggle-on' : 'btn-toggle-off';
+}
+
+async function init(){
+  const { data: qs } = await sb.from('quiz_state').select('current_round').eq('id', 1).single();
+  currentRound = qs.current_round;
+  document.getElementById('roundNum').textContent = currentRound;
+  await Promise.all([loadParticipants(), loadResults(), loadButtonState()]);
+
+  sb.channel('admin')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'quiz_state' }, async payload => {
+      currentRound = payload.new.current_round;
+      document.getElementById('roundNum').textContent = currentRound;
+      await Promise.all([loadResults(), loadButtonState()]);
+    })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'rounds' }, payload => {
+      if(payload.new && payload.new.round === currentRound) loadButtonState();
+    })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'participants' }, loadParticipants)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'presses' }, payload => {
+      if(payload.new && payload.new.round === currentRound) loadResults();
+    })
+    .subscribe();
+}
+init();
+
+document.getElementById('toggleBtn').onclick = async () => {
+  const next = !buttonOn;
+  const updates = { button_on: next };
+  if(next) updates.button_enabled_at = new Date().toISOString();
+  await sb.from('rounds').update(updates).eq('round', currentRound);
+};
+
+document.getElementById('resetPressBtn').onclick = async () => {
+  await sb.rpc('advance_round');
+};
+
+document.getElementById('resetAllBtn').onclick = async () => {
+  if(!confirm('参加者を全員削除します。よろしいですか？')) return;
+  await sb.rpc('reset_all');
+};
+</script>
+</body>
+</html>
