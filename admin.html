@@ -13,7 +13,7 @@
 
   <div class="card" style="text-align:center">
     <p class="muted">参加者はこのQRを読み取って参加</p>
-    <div id="qr"></div>
+    <div id="qr"><img id="qrImg" width="200" height="200" alt="QRコード" style="display:block;margin:0 auto"></div>
     <p class="muted" id="joinUrl"></p>
   </div>
 
@@ -44,16 +44,9 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
 <script src="supabase-config.js"></script>
 <script>
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-const joinUrl = location.origin + location.pathname.replace(/admin\.html$/, 'index.html');
-document.getElementById('joinUrl').textContent = joinUrl;
-QRCode.toCanvas(joinUrl, { width: 200 }, (err, canvas) => {
-  if(!err) document.getElementById('qr').appendChild(canvas);
-});
 
 let buttonOn = false;
 let currentRound = 1;
@@ -87,25 +80,31 @@ async function loadButtonState(){
 }
 
 async function init(){
-  const { data: qs } = await sb.from('quiz_state').select('current_round').eq('id', 1).single();
-  currentRound = qs.current_round;
-  document.getElementById('roundNum').textContent = currentRound;
-  await Promise.all([loadParticipants(), loadResults(), loadButtonState()]);
+  try {
+    const { data: qs, error } = await sb.from('quiz_state').select('current_round').eq('id', 1).single();
+    if(error) throw error;
+    currentRound = qs.current_round;
+    document.getElementById('roundNum').textContent = currentRound;
+    await Promise.all([loadParticipants(), loadResults(), loadButtonState()]);
 
-  sb.channel('admin')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'quiz_state' }, async payload => {
-      currentRound = payload.new.current_round;
-      document.getElementById('roundNum').textContent = currentRound;
-      await Promise.all([loadResults(), loadButtonState()]);
-    })
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'rounds' }, payload => {
-      if(payload.new && payload.new.round === currentRound) loadButtonState();
-    })
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'participants' }, loadParticipants)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'presses' }, payload => {
-      if(payload.new && payload.new.round === currentRound) loadResults();
-    })
-    .subscribe();
+    sb.channel('admin')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'quiz_state' }, async payload => {
+        currentRound = payload.new.current_round;
+        document.getElementById('roundNum').textContent = currentRound;
+        await Promise.all([loadResults(), loadButtonState()]);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'rounds' }, payload => {
+        if(payload.new && payload.new.round === currentRound) loadButtonState();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'participants' }, loadParticipants)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'presses' }, payload => {
+        if(payload.new && payload.new.round === currentRound) loadResults();
+      })
+      .subscribe();
+  } catch(err){
+    console.error('init failed:', err);
+    document.getElementById('roundNum').textContent = 'エラー';
+  }
 }
 init();
 
@@ -124,6 +123,16 @@ document.getElementById('resetAllBtn').onclick = async () => {
   if(!confirm('参加者を全員削除します。よろしいですか？')) return;
   await sb.rpc('reset_all');
 };
+
+// QRコード（画像APIのみに依存。外部JSライブラリ不要で失敗しても他の機能に影響しない）
+try {
+  const joinUrl = location.origin + location.pathname.replace(/admin\.html$/, 'index.html');
+  document.getElementById('joinUrl').textContent = joinUrl;
+  document.getElementById('qrImg').src =
+    'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=' + encodeURIComponent(joinUrl);
+} catch(err){
+  console.error('QR generation failed:', err);
+}
 </script>
 </body>
 </html>
